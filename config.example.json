@@ -1,0 +1,19 @@
+{
+  "gemini_api_key": "",
+  "serpapi_key": "",
+  "sender_email": "your.account@gmail.com",
+  "email_password": "",
+
+  "gemini_model": "gemini-3.8-flash",
+  "gemini_web_search": false,
+  "search_language": "es",
+  "search_country": "es",
+  "smtp_url": "smtps://smtp.gmail.com:465",
+  "smtp_tls": true,
+  "sender_name": "Reputation Report",
+
+  "delay_between_calls_ms": 500,
+  "max_review_pages": 3,
+  "first_run_days": 30,
+  "max_competitor_reviews": 5
+}

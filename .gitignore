@@ -1,0 +1,49 @@
+# ---- Secrets and real data: NEVER commit these ----
+config.json
+clients.json
+clientes.json
+processed_reviews.json
+historial_procesados.json
+*.tmp
+.env
+*.key
+*.pem
+
+# ---- Output the engine generates (contain real reviews and emails) ----
+reports/
+logs/
+mailbox/
+requests.jsonl
+
+# ---- Visual Studio: local settings and build output ----
+.vs/
+*.user
+*.suo
+x64/
+x86/
+Debug/
+Release/
+*.exe
+*.dll
+*.pdb
+*.obj
+*.ilk
+*.ipch
+*.tlog
+*.log
+*.iobj
+*.ipdb
+
+# ---- CMake / vcpkg build folders ----
+build/
+out/
+vcpkg_installed/
+
+# ---- Python test leftovers ----
+__pycache__/
+*.pyc
+
+# ---- OS clutter ----
+Thumbs.db
+desktop.ini
+.DS_Store

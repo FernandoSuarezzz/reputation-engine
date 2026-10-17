@@ -1,0 +1,8 @@
+{
+  "name": "motor-reputacion",
+  "version-string": "13.0",
+  "dependencies": [
+    { "name": "curl", "features": [ "ssl" ] },
+    "nlohmann-json"
+  ]
+}

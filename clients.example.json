@@ -1,0 +1,18 @@
+[
+    {
+        "id": "CLI-001",
+        "name": "Restaurante Trasgu",
+        "address": "Bulevar José Prat 27A, Madrid",
+        "website": "https://restaurantetrasgu.com/",
+        "email": "owner@example.com",
+        "category": "Restaurantes",
+        "active": true,
+        "frequency_days": 7,
+        "language": "en",
+        "ai_instructions": "Friendly but professional tone. Do not invent dishes or facts that are not in the review.",
+        "place_id": "",
+        "data_id": "",
+        "competitors": [],
+        "last_scan_date": ""
+    }
+]
