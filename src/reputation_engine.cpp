@@ -845,6 +845,9 @@ struct ReportText {
     const char *reviews_heading, *suggested_reply, *reply_unavailable, *footer;
     // Headings the AI must use in its analysis
     const char *h_situation, *h_versus, *h_win, *h_lose, *h_verdict, *h_pain, *h_opportunities, *h_action;
+    // Report layout
+    const char *brand, *period, *sentiment_heading, *positive, *neutral, *negative;
+    const char *col_vs_you, *reply_note, *of_reviews, *priority_label;
 };
 
 static const ReportText& report_text(const std::string& language) {
@@ -856,7 +859,9 @@ static const ReportText& report_text(const std::string& language) {
         "Reviews and suggested replies", "Suggested reply:", "Not available (temporary AI failure).",
         "Automatically generated report.",
         "Situation", "Versus the competition", "Where we win:", "Where we lose:", "Verdict:",
-        "Pain points", "Opportunities", "Action of the week"};
+        "Pain points", "Opportunities", "Action of the week",
+        "REPUTATION ENGINE", "Period", "Sentiment of new reviews", "Positive", "Neutral", "Negative",
+        "vs. you", "Draft: review it before posting.", "reviews on Google", "This week's priority"};
     static const ReportText es = {
         "es", "Spanish", "Informe de reputación", "Reseñas nuevas desde el", "generado el",
         "Nota en Google", "Reseñas nuevas", "Media del periodo", "Pos / Neu / Neg",
@@ -865,11 +870,15 @@ static const ReportText& report_text(const std::string& language) {
         "Reseñas y respuestas sugeridas", "Respuesta sugerida:", "No disponible (fallo temporal de la IA).",
         "Informe generado automáticamente.",
         "Situación", "Frente a la competencia", "Ganamos en:", "Perdemos en:", "Veredicto:",
-        "Puntos de dolor", "Oportunidades", "Acción de la semana"};
+        "Puntos de dolor", "Oportunidades", "Acción de la semana",
+        "REPUTATION ENGINE", "Periodo", "Sentimiento de las reseñas nuevas", "Positivas", "Neutras", "Negativas",
+        "vs. tú", "Borrador: revísalo antes de publicarlo.", "reseñas en Google", "Prioridad de la semana"};
     return to_lower(language).rfind("es", 0) == 0 ? es : en;
 }
-// The report is the email body, so there is no JavaScript (Gmail and Outlook don't run
-// it: v12's Chart.js charts arrived blank). The bars are plain <div>s.
+// The report is the email body, so it is built the way email clients need: layout with
+// tables, styles inline, no JavaScript (Gmail and Outlook don't run it: v12's Chart.js
+// charts arrived blank) and no web fonts. The only <style> block styles the AI's analysis,
+// whose tags come from the model, plus the phone layout.
 
 struct ReportData {
     const Client* client = nullptr;
@@ -896,6 +905,75 @@ static std::string sanitize_ai_html(const std::string& html) {
     return html;
 }
 
+// --- Report building blocks -----------------------------------------------------------
+namespace palette {
+    const char* const ink = "#0f172a";      // titles
+    const char* const text = "#334155";     // body text
+    const char* const muted = "#64748b";    // captions
+    const char* const line = "#e2e8f0";     // borders and empty bars
+    const char* const page = "#eef2f7";     // email background
+    const char* const accent = "#2563eb";   // bars, links
+    const char* const star = "#f59e0b";
+    const char* const pos = "#059669";
+    const char* const neu = "#d97706";
+    const char* const neg = "#dc2626";
+}
+
+// Five stars: the first `n` filled in amber, the rest light grey.
+static std::string star_glyphs(int n, int size_px = 14) {
+    n = std::clamp(n, 0, 5);
+    std::string s = "<span style='font-size:" + std::to_string(size_px) + "px;letter-spacing:1px'>";
+    s += std::string("<span style='color:") + palette::star + "'>";
+    for (int i = 0; i < n; ++i) s += "★";
+    s += std::string("</span><span style='color:") + palette::line + "'>";
+    for (int i = n; i < 5; ++i) s += "★";
+    return s + "</span></span>";
+}
+
+// Horizontal bar as a one-row table (email clients ignore most CSS widths on <div>s).
+static std::string bar(double fraction, const char* color, int height_px = 8) {
+    const int pct = static_cast<int>(std::lround(std::clamp(fraction, 0.0, 1.0) * 100));
+    const std::string h = std::to_string(height_px) + "px";
+    std::ostringstream b;
+    b << "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='border-collapse:separate'><tr>";
+    if (pct > 0)
+        b << "<td width='" << pct << "%' style='background:" << color << ";height:" << h
+          << ";border-radius:" << height_px / 2 << "px;font-size:0;line-height:0'>&nbsp;</td>";
+    if (pct < 100)
+        b << "<td style='height:" << h << ";font-size:0;line-height:0'>&nbsp;</td>";
+    b << "</tr></table>";
+    return b.str();
+}
+
+// First character of a name (UTF-8 aware), for the avatar circle.
+static std::string initial_of(const std::string& name) {
+    const std::string s = trim(name);
+    if (s.empty()) return "?";
+    const unsigned char lead = static_cast<unsigned char>(s[0]);
+    const size_t len = lead < 0x80 ? 1 : (lead >> 5) == 0x6 ? 2 : (lead >> 4) == 0xE ? 3 : (lead >> 3) == 0x1E ? 4 : 1;
+    std::string first = s.substr(0, std::min(len, s.size()));
+    if (len == 1) first[0] = static_cast<char>(std::toupper(lead));
+    return escape_html(first);
+}
+
+static const char* sentiment_color(int stars) {
+    return stars >= 4 ? palette::pos : (stars == 3 ? palette::neu : palette::neg);
+}
+
+// Splits the AI analysis at the "action of the week" heading, so the action can lead the
+// report. If the heading isn't there, the whole analysis stays where it is.
+static std::pair<std::string, std::string> split_action(const std::string& html, const std::string& heading) {
+    const std::string marker = "<h3>" + heading + "</h3>";
+    const size_t pos = html.find(marker);
+    if (pos == std::string::npos) return {html, ""};
+    return {html.substr(0, pos), trim(html.substr(pos + marker.size()))};
+}
+
+static std::string section_title(const char* title) {
+    return std::string("<tr><td style='padding:28px 32px 10px'><div style='font-size:12px;font-weight:700;"
+                       "letter-spacing:1.2px;text-transform:uppercase;color:") + palette::muted + "'>" + title + "</div></td></tr>";
+}
+
 static std::string render_report(const ReportData& d) {
     const Client& c = *d.client;
     const ReportText& t = report_text(c.language);
@@ -909,79 +987,163 @@ static std::string render_report(const ReportData& d) {
     }
     const int total = static_cast<int>(d.reviews.size());
     const int highest = std::max(1, *std::max_element(stars + 1, stars + 6));
+    const std::string rating = d.google_rating ? format_decimal(*d.google_rating) : "–";
+    const std::string average = total ? format_decimal(sum / total) : "–";
+
+    const std::string safe_analysis = d.analysis_html.empty() ? "" : sanitize_ai_html(d.analysis_html);
+    const auto [analysis_body, action] = split_action(safe_analysis, t.h_action);
 
     std::ostringstream h;
     h << "<!DOCTYPE html><html lang='" << t.html_lang << "'><head><meta charset='UTF-8'>"
          "<meta name='viewport' content='width=device-width, initial-scale=1'>"
          "<title>" << t.title << ": " << escape_html(c.name) << "</title><style>"
-         "body{font-family:Arial,Helvetica,sans-serif;background:#f4f6f8;color:#222;margin:0;padding:16px}"
-         ".caja{max-width:860px;margin:0 auto;background:#fff;padding:28px;border-radius:10px}"
-         "h1{font-size:22px;margin:0 0 4px}h2{font-size:18px;margin:32px 0 12px;border-left:4px solid #2f6fdf;padding-left:10px}"
-         ".sub{color:#666;font-size:13px}.kpis{width:100%;border-collapse:separate;border-spacing:8px;margin-top:16px}"
-         ".kpi{background:#f0f4fb;border-radius:8px;padding:12px;text-align:center}.kpi b{display:block;font-size:22px}"
-         ".fila{display:flex;align-items:center;margin:4px 0;font-size:13px}.etq{width:48px}"
-         ".barra{height:14px;background:#2f6fdf;border-radius:3px;margin-right:8px}"
-         ".analisis{background:#fffaf0;border:1px solid #f1e2c0;border-radius:8px;padding:18px;line-height:1.6}"
-         "table.rivales{width:100%;border-collapse:collapse}table.rivales td,table.rivales th{padding:8px;border-bottom:1px solid #eee;text-align:left}"
-         ".tarjeta{border:1px solid #e3e6ea;border-radius:8px;padding:14px;margin-bottom:12px}"
-         ".nota{float:right;font-weight:bold;padding:2px 8px;border-radius:10px;font-size:12px}"
-         ".pos{background:#e3f6ea;color:#1e7a3e}.neu{background:#fff4d6;color:#8a6200}.neg{background:#fde7e7;color:#a12626}"
-         ".resp{background:#f6f8fa;border-left:3px solid #2fb26a;padding:10px;margin-top:8px;font-size:14px}"
-         "</style></head><body><div class='caja'>";
+         ".analysis h3{font-size:15px;color:" << palette::ink << ";margin:22px 0 8px;padding-top:16px;border-top:1px solid " << palette::line << "}"
+         ".analysis h3:first-child{margin-top:0;padding-top:0;border-top:0}"
+         ".analysis p,.analysis li{font-size:14px;line-height:1.65;color:" << palette::text << ";margin:0 0 8px}"
+         ".analysis ul{margin:0;padding-left:20px}.analysis b{color:" << palette::ink << "}"
+         ".action p{margin:0;font-size:15px;line-height:1.6;color:#ffffff}"
+         "a{color:" << palette::accent << "}"
+         "@media (max-width:620px){.kpi{display:inline-block!important;width:50%!important;box-sizing:border-box}"
+         ".pad{padding-left:18px!important;padding-right:18px!important}}"
+         "</style></head>"
+      << "<body style='margin:0;padding:0;background:" << palette::page << ";font-family:-apple-system,BlinkMacSystemFont,"
+         "\"Segoe UI\",Roboto,Helvetica,Arial,sans-serif;color:" << palette::text << "'>"
+      << "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='background:" << palette::page << "'>"
+         "<tr><td align='center' style='padding:24px 12px'>"
+      << "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='max-width:640px;background:#ffffff;"
+         "border-radius:14px;overflow:hidden;border:1px solid " << palette::line << "'>";
 
-    h << "<h1>" << t.title << ": " << escape_html(c.name) << "</h1>"
-      << "<div class='sub'>" << t.since << " " << escape_html(d.cutoff_date)
-      << " · " << t.generated << " " << today() << "</div>";
+    // Header
+    h << "<tr><td class='pad' style='background:" << palette::ink << ";padding:28px 32px'>"
+      << "<div style='font-size:11px;font-weight:700;letter-spacing:2px;color:#93c5fd'>" << t.brand << "</div>"
+      << "<div style='font-size:24px;font-weight:700;color:#ffffff;margin-top:8px'>" << escape_html(c.name) << "</div>"
+      << "<div style='font-size:13px;color:#cbd5e1;margin-top:6px'>" << t.title << " · " << t.since << " "
+      << escape_html(d.cutoff_date) << " · " << t.generated << " " << today() << "</div>"
+      << "</td></tr>";
 
     // Headline numbers
-    h << "<table class='kpis'><tr>"
-      << "<td class='kpi'><b>" << (d.google_rating ? format_decimal(*d.google_rating) : "–") << "</b>" << t.kpi_rating << "</td>"
-      << "<td class='kpi'><b>" << total << "</b>" << t.kpi_new << "</td>"
-      << "<td class='kpi'><b>" << (total ? format_decimal(sum / total) : "–") << "</b>" << t.kpi_average << "</td>"
-      << "<td class='kpi'><b>" << positive << " / " << neutral << " / " << negative << "</b>" << t.kpi_split << "</td>"
-      << "</tr></table>";
+    auto kpi = [&](const std::string& value, const std::string& extra, const char* label) {
+        h << "<td class='kpi' width='25%' style='padding:6px'><div style='background:#f8fafc;border:1px solid " << palette::line
+          << ";border-radius:10px;padding:14px 12px;text-align:center'>"
+          << "<div style='font-size:24px;font-weight:700;color:" << palette::ink << "'>" << value << "</div>"
+          << "<div style='margin-top:2px;height:16px;line-height:16px'>" << (extra.empty() ? "&nbsp;" : extra) << "</div>"
+          << "<div style='font-size:12px;color:" << palette::muted << ";margin-top:4px'>" << label << "</div></div></td>";
+    };
+    h << "<tr><td class='pad' style='padding:22px 26px 0'><table role='presentation' width='100%' cellpadding='0' cellspacing='0'><tr>";
+    kpi(rating, d.google_rating ? star_glyphs(static_cast<int>(std::lround(*d.google_rating)), 12) : "", t.kpi_rating);
+    kpi(std::to_string(total), "", t.kpi_new);
+    kpi(average, "", t.kpi_average);
+    kpi("<span style='color:" + std::string(palette::pos) + "'>" + std::to_string(positive) + "</span> / "
+        "<span style='color:" + palette::neu + "'>" + std::to_string(neutral) + "</span> / "
+        "<span style='color:" + palette::neg + "'>" + std::to_string(negative) + "</span>", "", t.kpi_split);
+    h << "</tr></table></td></tr>";
 
-    // Star distribution
-    h << "<h2>" << t.stars_heading << "</h2>";
+    // The action of the week leads the report
+    if (!action.empty()) {
+        h << "<tr><td class='pad' style='padding:20px 32px 0'><div class='action' style='background:" << palette::accent
+          << ";border-radius:12px;padding:18px 20px'>"
+          << "<div style='font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:#bfdbfe;margin-bottom:6px'>"
+          << t.priority_label << "</div>" << action << "</div></td></tr>";
+    }
+
+    // Sentiment and star distribution
+    h << section_title(t.sentiment_heading)
+      << "<tr><td class='pad' style='padding:0 32px'>";
+    if (total > 0) {
+        h << "<table role='presentation' width='100%' cellpadding='0' cellspacing='0' style='border-collapse:separate;border-spacing:0'><tr>";
+        const std::pair<int, const char*> parts[] = {{positive, palette::pos}, {neutral, palette::neu}, {negative, palette::neg}};
+        for (const auto& [n, color] : parts)
+            if (n > 0) h << "<td width='" << (n * 100 / total) << "%' style='background:" << color
+                         << ";height:12px;font-size:0;line-height:0'>&nbsp;</td>";
+        h << "</tr></table>"
+          << "<div style='font-size:13px;color:" << palette::muted << ";margin-top:8px'>"
+          << "<span style='color:" << palette::pos << ";font-weight:700'>●</span> " << t.positive << " " << positive << " &nbsp;&nbsp;"
+          << "<span style='color:" << palette::neu << ";font-weight:700'>●</span> " << t.neutral << " " << neutral << " &nbsp;&nbsp;"
+          << "<span style='color:" << palette::neg << ";font-weight:700'>●</span> " << t.negative << " " << negative << "</div>";
+    }
+    h << "</td></tr>";
+
+    h << section_title(t.stars_heading)
+      << "<tr><td class='pad' style='padding:0 32px'><table role='presentation' width='100%' cellpadding='0' cellspacing='0'>";
     for (int s = 5; s >= 1; --s)
-        h << "<div class='fila'><span class='etq'>" << s << " ★</span><div class='barra' style='width:"
-          << std::max(2, stars[s] * 300 / highest) << "px'></div>" << stars[s] << "</div>";
+        h << "<tr><td width='44' style='font-size:13px;color:" << palette::text << ";padding:4px 0;white-space:nowrap'>" << s
+          << " <span style='color:" << palette::star << "'>★</span></td>"
+          << "<td style='padding:4px 10px'>" << bar(static_cast<double>(stars[s]) / highest, palette::accent) << "</td>"
+          << "<td width='24' align='right' style='font-size:13px;color:" << palette::muted << "'>" << stars[s] << "</td></tr>";
+    h << "</table></td></tr>";
 
     // AI analysis
-    h << "<h2>" << t.analysis_heading << "</h2><div class='analisis'>"
-      << (d.analysis_html.empty() ? std::string("<p>") + t.no_analysis + "</p>"
-                                  : sanitize_ai_html(d.analysis_html))
-      << "</div>";
+    h << section_title(t.analysis_heading)
+      << "<tr><td class='pad' style='padding:0 32px'><div class='analysis' style='background:#f8fafc;border:1px solid "
+      << palette::line << ";border-radius:12px;padding:20px 22px'>"
+      << (safe_analysis.empty() ? std::string("<p>") + t.no_analysis + "</p>" : analysis_body)
+      << "</div></td></tr>";
 
     // Competitors
     if (!d.competitors.empty()) {
-        h << "<h2>" << t.competitors_heading << "</h2><table class='rivales'><tr><th>" << t.col_business << "</th><th>"
-          << t.col_rating << "</th><th>" << t.col_reviews << "</th><th></th></tr>";
-        h << "<tr><td><b>" << escape_html(c.name) << " " << t.you << "</b></td><td>"
-          << (d.google_rating ? format_decimal(*d.google_rating) : "–") << "</td><td>"
-          << (d.total_reviews ? std::to_string(*d.total_reviews) : "–") << "</td><td></td></tr>";
-        for (const auto& info : d.competitors)
-            h << "<tr><td>" << escape_html(info.competitor.name.empty() ? info.competitor.place_id : info.competitor.name) << "</td><td>"
-              << (info.rating ? format_decimal(*info.rating) : "–") << "</td><td>"
-              << (info.total ? std::to_string(*info.total) : "–") << "</td><td><a href='"
-              << escape_html(maps_url(info.competitor.place_id, info.competitor.name)) << "'>" << t.view_on_maps << "</a></td></tr>";
-        h << "</table>";
+        const double own = d.google_rating.value_or(0.0);
+        h << section_title(t.competitors_heading)
+          << "<tr><td class='pad' style='padding:0 32px'><table role='presentation' width='100%' cellpadding='0' cellspacing='0' "
+             "style='border:1px solid " << palette::line << ";border-radius:12px;border-collapse:separate;overflow:hidden'>"
+          << "<tr style='background:#f8fafc'>"
+          << "<th align='left' style='font-size:12px;color:" << palette::muted << ";padding:10px 14px;font-weight:600'>" << t.col_business << "</th>"
+          << "<th align='left' style='font-size:12px;color:" << palette::muted << ";padding:10px 8px;font-weight:600'>" << t.col_rating << "</th>"
+          << "<th align='right' style='font-size:12px;color:" << palette::muted << ";padding:10px 8px;font-weight:600'>" << t.col_reviews << "</th>"
+          << "<th align='right' style='font-size:12px;color:" << palette::muted << ";padding:10px 14px;font-weight:600'>" << t.col_vs_you << "</th></tr>";
+        h << "<tr style='background:#eff6ff'><td style='padding:12px 14px;font-size:14px;color:" << palette::ink << "'><b>"
+          << escape_html(c.name) << "</b> <span style='color:" << palette::accent << ";font-size:12px'>" << t.you << "</span></td>"
+          << "<td style='padding:12px 8px;font-size:14px;color:" << palette::ink << ";white-space:nowrap'><b>" << rating << "</b> "
+          << (d.google_rating ? star_glyphs(static_cast<int>(std::lround(own)), 11) : "") << "</td>"
+          << "<td align='right' style='padding:12px 8px;font-size:14px'>" << (d.total_reviews ? std::to_string(*d.total_reviews) : "–") << "</td>"
+          << "<td align='right' style='padding:12px 14px;font-size:13px;color:" << palette::muted << "'>–</td></tr>";
+        for (const auto& info : d.competitors) {
+            std::string diff = "–";
+            const char* diff_color = palette::muted;
+            if (info.rating && d.google_rating) {
+                const double delta = *info.rating - own;   // positive: they are ahead of us
+                diff = (delta > 0.05 ? "+" : delta < -0.05 ? "−" : "±") + format_decimal(std::abs(delta));
+                diff_color = delta > 0.05 ? palette::neg : delta < -0.05 ? palette::pos : palette::muted;
+            }
+            h << "<tr><td style='padding:12px 14px;font-size:14px;border-top:1px solid " << palette::line << "'>"
+              << escape_html(info.competitor.name.empty() ? info.competitor.place_id : info.competitor.name)
+              << "<div style='font-size:12px;margin-top:2px'><a href='" << escape_html(maps_url(info.competitor.place_id, info.competitor.name))
+              << "' style='color:" << palette::accent << ";text-decoration:none'>" << t.view_on_maps << " →</a></div></td>"
+              << "<td style='padding:12px 8px;font-size:14px;white-space:nowrap;border-top:1px solid " << palette::line << "'>"
+              << (info.rating ? format_decimal(*info.rating) : "–") << " "
+              << (info.rating ? star_glyphs(static_cast<int>(std::lround(*info.rating)), 11) : "") << "</td>"
+              << "<td align='right' style='padding:12px 8px;font-size:14px;border-top:1px solid " << palette::line << "'>"
+              << (info.total ? std::to_string(*info.total) : "–") << "</td>"
+              << "<td align='right' style='padding:12px 14px;font-size:13px;font-weight:700;color:" << diff_color
+              << ";border-top:1px solid " << palette::line << "'>" << diff << "</td></tr>";
+        }
+        h << "</table></td></tr>";
     }
 
     // Reviews with suggested replies
-    h << "<h2>" << t.reviews_heading << "</h2>";
+    h << section_title(t.reviews_heading);
     for (const auto& [r, reply] : d.reviews) {
-        const char* css_class = r.stars >= 4 ? "pos" : (r.stars == 3 ? "neu" : "neg");
-        h << "<div class='tarjeta'><span class='nota " << css_class << "'>" << r.stars << "/5</span>"
-          << "<b>" << escape_html(r.author) << "</b> <span class='sub'>" << escape_html(r.date) << "</span>"
-          << "<p>" << escape_html(r.text) << "</p>"
-          << "<div class='resp'><b>" << t.suggested_reply << "</b> "
-          << (reply.empty() ? std::string("<i>") + t.reply_unavailable + "</i>" : escape_html(reply))
-          << "</div></div>";
+        const char* color = sentiment_color(r.stars);
+        h << "<tr><td class='pad' style='padding:0 32px 14px'><div style='border:1px solid " << palette::line
+          << ";border-radius:12px;padding:16px 18px'>"
+          << "<table role='presentation' width='100%' cellpadding='0' cellspacing='0'><tr>"
+          << "<td width='44' valign='top'><div style='width:36px;height:36px;border-radius:18px;background:" << color
+          << ";color:#ffffff;font-weight:700;font-size:15px;line-height:36px;text-align:center'>" << initial_of(r.author) << "</div></td>"
+          << "<td valign='top'><div style='font-size:14px;font-weight:700;color:" << palette::ink << "'>" << escape_html(r.author) << "</div>"
+          << "<div style='margin-top:2px'>" << star_glyphs(r.stars, 13) << " <span style='font-size:12px;color:" << palette::muted
+          << "'>&nbsp;" << escape_html(r.date) << "</span></div></td></tr></table>"
+          << "<p style='font-size:14px;line-height:1.6;color:" << palette::text << ";margin:12px 0 0'>" << escape_html(r.text) << "</p>"
+          << "<div style='background:#f0fdf4;border:1px solid #bbf7d0;border-radius:10px;padding:12px 14px;margin-top:12px'>"
+          << "<div style='font-size:12px;font-weight:700;color:" << palette::pos << ";margin-bottom:4px'>" << t.suggested_reply << "</div>"
+          << "<div style='font-size:14px;line-height:1.6;color:" << palette::text << "'>"
+          << (reply.empty() ? std::string("<i>") + t.reply_unavailable + "</i>" : escape_html(reply)) << "</div>"
+          << (reply.empty() ? "" : std::string("<div style='font-size:11px;color:") + palette::muted + ";margin-top:6px'>" + t.reply_note + "</div>")
+          << "</div></div></td></tr>";
     }
 
-    h << "<p class='sub' style='text-align:center;margin-top:28px'>" << t.footer << "</p>"
-         "</div></body></html>";
+    // Footer
+    h << "<tr><td class='pad' style='padding:18px 32px 26px;border-top:1px solid " << palette::line
+      << ";font-size:12px;color:" << palette::muted << ";text-align:center'>" << t.footer << " · " << t.brand << "</td></tr>"
+      << "</table></td></tr></table></body></html>";
     return h.str();
 }
 
